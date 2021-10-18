@@ -1,0 +1,121 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+
+import subprocess, sys, re, argparse, stat, os
+from subprocess import DEVNULL, PIPE
+
+# use a prefix to create snapshots
+SNAPSHOT_PREFIX="borg_snapshot"
+
+def get_lv_details(target):
+    # fetch output of lvdisplay and return a tuple of (vg_name, lv_name, lv_size)
+    vg_name = lv_name = lv_size = None
+    process = subprocess.Popen(["lvdisplay", "--units", "K", target], stdout=PIPE, stderr=DEVNULL, universal_newlines=True)
+    if process == 0:
+        return (None, None, None)
+    output, errors = process.communicate(timeout=5)
+    for line in output.split("\n"):
+        result = re.search('\s+VG\sName\s+([^$]+)$', line)
+        if result is not None:
+            vg_name = result.group(1)
+            continue
+        result = re.search('\s+LV\sName\s+([^$]+)$', line)
+        if result is not None:
+            lv_name = result.group(1)
+            continue
+        result = re.search('\s+LV\sSize\s+([\d]+)[^\d]', line)
+        if result is not None:
+            lv_size = int(result.group(1))
+            continue
+
+    if vg_name is not None and lv_name is not None and lv_size is not None:
+        return (vg_name, lv_name, lv_size)
+    else:
+        return (None, None, None)
+
+def lv_exists(path):
+    # check if a block devices exists, return True or False
+    try:
+        return stat.S_ISBLK(os.stat(path).st_mode)
+    except:
+        return False
+
+def cleanup(snapshot_list):
+    # cleanup all snapshots
+    for i in snapshot_list:
+        remove_snapshot(i)
+
+def remove_snapshot(target):
+    # remove snapshot, check if it exists and if the snapshot prefix is included in the name
+    if lv_exists(target['snapshot']) and SNAPSHOT_PREFIX in target['snapshot']:
+        lvremove = ["lvremove", "-f", target['snapshot']]
+        result = subprocess.run(lvremove, stdout=DEVNULL, stderr=DEVNULL)
+        if result.returncode == 0:
+            print ("Snapshot removal succesful --", ' '.join(lvremove))
+        else:
+            print ("Snapshot removal failed --", ' '.join(lvremove))
+    else:
+        print ("Snapshot removal failed -- Snapshot", target['snapshot'], "not found")
+
+def create_snapshot(target):
+    # create snapshot
+    lvcreate = ["lvcreate", "-s", "-L", str(target['snapshot_size']) + "K", "-n", target['snapshot_name'], target['target']]
+    result = subprocess.run(lvcreate, stdout=DEVNULL, stderr=DEVNULL)
+    if result.returncode == 0:
+        print ("Snapshot creation successful --" , ' '.join(lvcreate))
+        return target['snapshot_name']
+    else:
+        print ("Snapshot creation failed --" , ' '.join(lvcreate))
+        return None
+
+def create_target_list(targets, snapshot_percentage):
+    # create a list of dicts containing all backup targets with relevant informations
+    target_list = []
+    for i in targets:
+        pv_name, lv_name, lv_size = get_lv_details(i)
+        # if lv does not exist stop the backup
+        if pv_name == None:
+            print ('Backup stopped, target', i, 'does not exist.')
+            sys.exit(75)
+        snapshot = '/'.join(i.split('/')[:-1] + [SNAPSHOT_PREFIX + '_' + lv_name])
+        snapshot_size = int(lv_size * (snapshot_percentage / 100))
+        target_list.append({'target': i,
+                            'pv_name': pv_name,
+                            'lv_name': lv_name,
+                            'snapshot': snapshot,
+                            'snapshot_size': snapshot_size,
+                            'snapshot_name': SNAPSHOT_PREFIX + '_' + lv_name})
+    return target_list
+
+def main():
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(help='sub-command help', dest='subparser_name')
+    parser_a = subparsers.add_parser('create', help='Create LV Snapshots')
+    parser_a.add_argument('--lv', required=True, action='append', dest='lv')
+    parser_a.add_argument('-s', dest='snapshot_percentage', default='10')
+    parser_b = subparsers.add_parser('remove', help='Remove LV Snapshots')
+    parser_b.add_argument('--lv', required=True, action='append', dest='lv')
+    args = parser.parse_args() 
+
+    if len(sys.argv) < 2:
+        parser.print_help()
+        parser.exit()
+
+    if len(args.lv) > 0:
+        target_list = create_target_list(args.lv, int(args.snapshot_percentage) if hasattr(args, 'snapshot_percentage') else 0)
+
+    if args.subparser_name == 'create':
+        # create snapshots
+        for i in target_list:
+            result = create_snapshot(i)
+            if result is None:
+                cleanup(target_list)
+                sys.exit(75)
+
+    elif args.subparser_name == 'remove':
+        cleanup(target_list)
+
+
+if __name__ == "__main__":
+    main()
+
