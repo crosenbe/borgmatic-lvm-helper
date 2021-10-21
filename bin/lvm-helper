@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/opt/borgmatic/bin/python3
 # -*- coding: utf-8 -*-
 
 import subprocess, sys, re, argparse, stat, os
@@ -40,6 +40,21 @@ def lv_exists(path):
     except:
         return False
 
+def is_snapshot(target):
+    # fetch output of lvdisplay and return True if the target is a snapshot
+    snapshot = False
+    process = subprocess.Popen(["lvdisplay", "--units", "K", target], stdout=PIPE, stderr=DEVNULL, universal_newlines=True)
+    if process == 0:
+        return snapshot
+    output, errors = process.communicate(timeout=5)
+    for line in output.split("\n"):
+        result = re.search('\s+LV\ssnapshot\sstatus\s+(active destination)', line)
+        if result is not None:
+            if result.group(1) == "active destination":
+                snapshot = True
+            continue
+    return snapshot
+
 def cleanup(snapshot_list):
     # cleanup all snapshots
     for i in snapshot_list:
@@ -47,7 +62,7 @@ def cleanup(snapshot_list):
 
 def remove_snapshot(target):
     # remove snapshot, check if it exists and if the snapshot prefix is included in the name
-    if lv_exists(target['snapshot']) and SNAPSHOT_PREFIX in target['snapshot']:
+    if lv_exists(target['snapshot']) and SNAPSHOT_PREFIX in target['snapshot'] and is_snapshot(target['snapshot']):
         lvremove = ["lvremove", "-f", target['snapshot']]
         result = subprocess.run(lvremove, stdout=DEVNULL, stderr=DEVNULL)
         if result.returncode == 0:
